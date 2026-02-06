@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+
+# Env
+.env
+.env.*
+
+# Local data / outputs
+library-dashboard/backend/library_dashboard.db
+library_availability_results.csv
+goodreads_library_export.csv
+
+# Playwright
+playwright/.local-browsers/
+
+# Logs
+*.log
+
+# Temp
+.tmp/
+.tmp/**
