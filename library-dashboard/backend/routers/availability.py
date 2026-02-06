@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
+from sqlalchemy import desc
 from typing import List
 from datetime import datetime, timedelta
 import uuid
@@ -34,7 +35,26 @@ def get_or_create_default_user(db: Session) -> User:
     return user
 
 
-async def check_book_availability(book: Book, libraries: List[Library], db: Session):
+def _get_latest_cache(db: Session, book_id: int, library_id: int) -> AvailabilityCache | None:
+    caches = db.query(AvailabilityCache).filter(
+        AvailabilityCache.book_id == book_id,
+        AvailabilityCache.library_id == library_id
+    ).order_by(desc(AvailabilityCache.checked_at)).all()
+
+    if not caches:
+        return None
+
+    latest = caches[0]
+    # Remove any duplicates so we only keep one row per book+library
+    if len(caches) > 1:
+        for duplicate in caches[1:]:
+            db.delete(duplicate)
+        db.commit()
+
+    return latest
+
+
+async def check_book_availability(book: Book, libraries: List[Library], db: Session, force: bool = False):
     """Check availability of a single book across all libraries."""
     results = []
 
@@ -42,14 +62,11 @@ async def check_book_availability(book: Book, libraries: List[Library], db: Sess
         if not library.is_active:
             continue
 
-        # Check cache first
-        cache = db.query(AvailabilityCache).filter(
-            AvailabilityCache.book_id == book.id,
-            AvailabilityCache.library_id == library.id
-        ).first()
+        # Check cache first (dedupe any existing duplicates)
+        cache = _get_latest_cache(db, book.id, library.id)
 
-        # Use cache if fresh
-        if cache and cache.expires_at and cache.expires_at > datetime.utcnow():
+        # Use cache if fresh (unless forced)
+        if not force and cache and cache.expires_at and cache.expires_at > datetime.utcnow():
             results.append(cache)
             continue
 
@@ -91,7 +108,7 @@ async def check_book_availability(book: Book, libraries: List[Library], db: Sess
     return results
 
 
-async def check_all_books_task(job_id: str, user_id: int):
+async def check_all_books_task(job_id: str, user_id: int, force: bool = False):
     """Background task to check availability for all books."""
     from models.database import SessionLocal
 
@@ -111,7 +128,7 @@ async def check_all_books_task(job_id: str, user_id: int):
 
         total = len(books)
         for i, book in enumerate(books):
-            await check_book_availability(book, libraries, db)
+            await check_book_availability(book, libraries, db, force=force)
             running_jobs[job_id]["progress"] = int((i + 1) / total * 100)
             # Small delay between books to avoid rate limiting
             await asyncio.sleep(0.5)
@@ -148,7 +165,7 @@ async def check_single_book(
     if not libraries:
         raise HTTPException(status_code=400, detail="No libraries configured")
 
-    results = await check_book_availability(book, libraries, db)
+    results = await check_book_availability(book, libraries, db, force=bool(request.force))
 
     return [
         AvailabilityResponse(
@@ -167,13 +184,14 @@ async def check_single_book(
 @router.post("/check-all", response_model=AvailabilityCheckAllResponse)
 async def check_all_books(
     background_tasks: BackgroundTasks,
+    force: bool = False,
     db: Session = Depends(get_db)
 ):
     """Start a background job to check availability for all books."""
     user = get_or_create_default_user(db)
 
     job_id = str(uuid.uuid4())
-    background_tasks.add_task(check_all_books_task, job_id, user.id)
+    background_tasks.add_task(check_all_books_task, job_id, user.id, force)
 
     return AvailabilityCheckAllResponse(
         job_id=job_id,
@@ -203,6 +221,12 @@ async def get_cached_availability(book_id: int, db: Session = Depends(get_db)):
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
+    # Deduplicate and return only the most recent cache per library
+    latest_by_library = {}
+    for cache in sorted(book.availability_cache, key=lambda c: c.checked_at or datetime.min, reverse=True):
+        if cache.library_id not in latest_by_library:
+            latest_by_library[cache.library_id] = cache
+
     return [
         AvailabilityResponse(
             book_id=cache.book_id,
@@ -213,5 +237,5 @@ async def get_cached_availability(book_id: int, db: Session = Depends(get_db)):
             libby_url=cache.libby_url,
             checked_at=cache.checked_at
         )
-        for cache in book.availability_cache
+        for cache in latest_by_library.values()
     ]

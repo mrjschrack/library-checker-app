@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 import logging
+from datetime import datetime
 
 from models import (
     get_db, User, Book,
@@ -53,33 +54,65 @@ async def sync_goodreads(request: GoodreadsSyncRequest, db: Session = Depends(ge
     # Update user's RSS URL
     user.goodreads_rss_url = request.rss_url
 
-    # Delete all existing books for this user (replace instead of merge)
-    db.query(Book).filter(Book.user_id == user.id).delete()
-    db.commit()
+    # Load existing books and index by goodreads_id or title+author
+    existing_books = db.query(Book).filter(Book.user_id == user.id).all()
+    by_goodreads_id = {b.goodreads_id: b for b in existing_books if b.goodreads_id}
+    by_title_author = {
+        f"{(b.title or '').strip().lower()}::{(b.author or '').strip().lower()}": b
+        for b in existing_books if not b.goodreads_id
+    }
 
-    # Add fresh books from RSS
     synced_books = []
+    seen_book_ids = set()
 
     for parsed in parsed_books:
-        # Create new book
-        book = Book(
-            user_id=user.id,
-            goodreads_id=parsed.goodreads_id,
-            title=parsed.title,
-            author=parsed.author,
-            isbn13=parsed.isbn13,
-            cover_url=parsed.cover_url,
-            date_added=parsed.date_added,
-            shelf=parsed.shelf
-        )
-        db.add(book)
-        synced_books.append(book)
+        key = f"{(parsed.title or '').strip().lower()}::{(parsed.author or '').strip().lower()}"
+        book = None
+
+        if parsed.goodreads_id:
+            book = by_goodreads_id.get(parsed.goodreads_id)
+        if not book:
+            book = by_title_author.get(key)
+
+        if book:
+            # Update existing book
+            book.goodreads_id = parsed.goodreads_id or book.goodreads_id
+            book.title = parsed.title
+            book.author = parsed.author
+            book.isbn13 = parsed.isbn13
+            book.cover_url = parsed.cover_url
+            book.date_added = parsed.date_added
+            book.shelf = parsed.shelf
+            synced_books.append(book)
+            seen_book_ids.add(book.id)
+        else:
+            # Create new book
+            new_book = Book(
+                user_id=user.id,
+                goodreads_id=parsed.goodreads_id,
+                title=parsed.title,
+                author=parsed.author,
+                isbn13=parsed.isbn13,
+                cover_url=parsed.cover_url,
+                date_added=parsed.date_added,
+                shelf=parsed.shelf
+            )
+            db.add(new_book)
+            synced_books.append(new_book)
 
     db.commit()
 
-    # Refresh to get IDs
+    # Refresh to get IDs for new books and mark them seen
     for book in synced_books:
         db.refresh(book)
+        seen_book_ids.add(book.id)
+
+    # Remove books no longer in the feed
+    for book in existing_books:
+        if book.id not in seen_book_ids:
+            db.delete(book)
+
+    db.commit()
 
     return synced_books
 
@@ -95,10 +128,14 @@ async def get_books(db: Session = Depends(get_db)):
 
     result = []
     for book in books:
-        # Get availability cache for this book
-        availability = []
-        for cache in book.availability_cache:
-            availability.append(AvailabilityResponse(
+        # Get most recent availability per library
+        latest_by_library = {}
+        for cache in sorted(book.availability_cache, key=lambda c: c.checked_at or datetime.min, reverse=True):
+            if cache.library_id not in latest_by_library:
+                latest_by_library[cache.library_id] = cache
+
+        availability = [
+            AvailabilityResponse(
                 book_id=cache.book_id,
                 library_id=cache.library_id,
                 library_name=cache.library.name,
@@ -106,7 +143,9 @@ async def get_books(db: Session = Depends(get_db)):
                 search_url=cache.search_url,
                 libby_url=cache.libby_url,
                 checked_at=cache.checked_at
-            ))
+            )
+            for cache in latest_by_library.values()
+        ]
 
         result.append(BookWithAvailability(
             id=book.id,

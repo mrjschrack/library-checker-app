@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import Image from 'next/image'
 import { RefreshCw, ExternalLink } from 'lucide-react'
-import { BookWithAvailability, checkAvailability, borrowBook, placeHold, getLibbyDeepLink } from '@/lib/api'
+import { BookWithAvailability, checkAvailability, getLibbyDeepLink } from '@/lib/api'
 import LibraryBadge from './LibraryBadge'
 
 interface BookCardProps {
@@ -18,7 +18,7 @@ export default function BookCard({ book, onUpdate }: BookCardProps) {
   const handleRefresh = async () => {
     setIsChecking(true)
     try {
-      const availability = await checkAvailability(book.id)
+      const availability = await checkAvailability(book.id, true)
       if (onUpdate) {
         onUpdate({ ...book, availability })
       }
@@ -31,7 +31,8 @@ export default function BookCard({ book, onUpdate }: BookCardProps) {
 
   const handleBadgeClick = async (libraryId: number, status: string, searchUrl: string, libbyUrl?: string) => {
     // Prefer the Libby share URL if available, otherwise fall back to OverDrive search
-    const url = libbyUrl || searchUrl
+    const url = libbyUrl || (searchUrl ? getLibbyDeepLink(searchUrl) : '')
+    if (!url) return
     window.open(url, '_blank')
   }
 

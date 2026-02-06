@@ -88,6 +88,7 @@ class GoodreadsSyncResponse(BaseModel):
 # Availability check schemas
 class AvailabilityCheckRequest(BaseModel):
     book_id: int
+    force: Optional[bool] = False
 
 
 class AvailabilityCheckAllResponse(BaseModel):

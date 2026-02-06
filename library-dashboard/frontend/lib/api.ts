@@ -85,18 +85,19 @@ export async function deleteLibrary(id: number): Promise<void> {
 }
 
 // Availability endpoints
-export async function checkAvailability(bookId: number): Promise<Availability[]> {
+export async function checkAvailability(bookId: number, force = false): Promise<Availability[]> {
   const res = await fetch(`${API_BASE}/api/availability/check`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ book_id: bookId }),
+    body: JSON.stringify({ book_id: bookId, force }),
   })
   if (!res.ok) throw new Error('Failed to check availability')
   return res.json()
 }
 
-export async function checkAllAvailability(): Promise<{ job_id: string }> {
-  const res = await fetch(`${API_BASE}/api/availability/check-all`, {
+export async function checkAllAvailability(force = false): Promise<{ job_id: string }> {
+  const url = `${API_BASE}/api/availability/check-all${force ? '?force=true' : ''}`
+  const res = await fetch(url, {
     method: 'POST',
   })
   if (!res.ok) throw new Error('Failed to start availability check')
